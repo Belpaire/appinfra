@@ -1,0 +1,116 @@
+### Layer 1
+##############
+entity AppService:
+    """
+        This entity models the application service offered to the end user.
+    """
+    ip::cidr network_address
+    number prefix_length=24
+    number networks_per_site=8
+end
+
+implement AppService using std::none
+
+### Layer 2
+##############
+entity Site:
+    """
+        A site where the application is deployed
+    """
+    string name
+    tier_n api_instances=1
+    tier_n backend_instances=1
+    tier_n state_instances=1
+    ip::cidr network_address
+    number site_index
+end
+
+index Site(name)
+index Site(site_index)
+
+AppService.sites [1:] -- Site.app_service [1]
+"""
+Each app is hosted on one or more sites.
+"""
+
+### Layer 3
+##############
+typedef tier_n as number matching self > 0
+typedef tier_type as string matching self == "api" or self == "backend" or self == "state"
+
+entity Tier:
+    """
+        Application tier at a specific site
+    """
+    string name
+    tier_type type
+    tier_n n_instances
+    ip::cidr network_address
+end
+
+index Tier(site, type)
+
+Site.tiers [0:] -- Tier.site [1]
+Site.api_tier [1] -- Tier
+Site.backend_tier [1] -- Tier
+Site.state_tier [1] -- Tier
+
+Tier.apps [0:] -- app::App
+"""
+A list of all application instances in this tier
+"""
+
+### Layer 4
+################
+entity Host extends ip::Host:
+    """
+        This entity models a host (vm) for this application. This host will provision a virtual machine on the target site (openstack, aws, ..)
+    """
+    ip::ip? public_ip
+end
+
+Host.tier [1] -- Tier.instances [0:]
+
+implement Host using std::hostDefaults
+
+implementation site for Site:
+    self.network_address = appinfra::calc_site_network(self)
+end
+
+implement Site using site
+
+implementation tier for Tier:
+    self.name = "{{ site.name }}-{{ type }}"
+
+    for i in std::sequence(self.n_instances, 1):
+        Host(name="{{ name }}-vm-{{ i }}", tier=self)
+    end
+end
+
+implement Tier using tier
+
+implementation hostBase for Host:
+    self.os = redhat::centos7
+    self.tier.apps = app::App(host=self, site=self.tier.site.name, tier=self.tier.name, name=self.name)
+end
+
+implement Host using hostBase
+
+implementation appConnections for Site:
+    for app in self.api_tier.apps:
+        app.connects_to = self.backend_tier.apps
+    end
+
+    for app in self.backend_tier.apps:
+        app.connects_to = self.state_tier.apps
+    end
+
+    for app in self.state_tier.apps:
+        # app.connects_to = self.state_tier.apps:
+        for site in self.app_service.sites:
+            app.connects_to = site.state_tier.apps
+        end
+    end
+end
+
+implement Site using site, appConnections
